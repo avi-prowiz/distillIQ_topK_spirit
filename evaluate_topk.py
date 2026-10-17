@@ -50,7 +50,10 @@ def oof_records(truth, B, folds, extra_neg, cache):
             continue
         tr, te = truth[truth.fold != f], truth[truth.fold == f]
         mdir = cache / f"model_fold{f}_of{folds}"
-        added, n = bt.build_model(tr, B, mdir, extra_neg)
+        if (mdir / 'graph.pkl').exists() and (mdir / 'topk_meta.pkl').exists():
+            added, n = -1, -1       # model for this fold already built (cache): reuse it
+        else:
+            added, n = bt.build_model(tr, B, mdir, extra_neg)
         tk = TopK(mdir)
         pool = {}
         rows = []
@@ -225,6 +228,29 @@ def fit_calibration(R, ranked, folds):
     return dict(w=w, b=b, mu=mu, sd=sd), oof, y, q
 
 
+def floor_table(R, ranked, oof, q, max_loss=0.0025):
+    """Options whose calibrated confidence is below a floor are not shown (fewer options is fine). For each floor:
+    liquor top-5 hit rate, average options shown, share of liquor names left with no option. Picks the largest
+    floor that loses at most `max_loss` of top-5 hit rate."""
+    by_row = {}
+    for (i, r), c in zip(q, oof):
+        by_row.setdefault(i, []).append((r, c))
+    alc = [i for i in range(len(R)) if not R["misc_truth"][i]]
+    rows = []
+    for floor in [0.0, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1]:
+        hits = shown = empty = 0
+        for i in alc:
+            opts = [(r, c) for r, c in by_row.get(i, []) if c >= floor]
+            shown += len(opts)
+            empty += not opts
+            keys = [item_key(ranked[i][r][0]) for r, _ in opts]
+            hits += R["truth_key"][i] in keys
+        rows.append(dict(min_confidence=floor, liquor_top5=hits / len(alc), avg_options=shown / len(alc), no_options=empty / len(alc)))
+    T = pd.DataFrame(rows)
+    ok = T[T.liquor_top5 >= T.liquor_top5.iloc[0] - max_loss]
+    return float(ok.min_confidence.max()), T
+
+
 def calibration_table(oof, y, q):
     top1 = np.array([r == 0 for _, r in q])
     rows = []
@@ -295,6 +321,11 @@ def fit_and_save(args):
     cal, oof, y, q = fit_calibration(R, ranked, args.folds)
     print(chr(10) + "confidence calibration (out-of-fold), top-1 options:")
     print(calibration_table(oof, y, q).to_string(index=False))
+    floor, ftab = floor_table(R, ranked, oof, q)
+    print(chr(10) + "display floor (options below this confidence are not shown):")
+    print(ftab.to_string(index=False))
+    cfg = {**cfg, "min_conf": floor}
+    print("chosen min_conf:", floor)
     out = Path(args.out_dir)
     bt.build_model(truth, B, out, args.extra_negatives)
     with open(out / "topk_meta.pkl", "rb") as f:

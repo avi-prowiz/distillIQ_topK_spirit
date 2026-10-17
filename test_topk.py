@@ -51,3 +51,21 @@ print("5 ok")
 # 6. the same raw name always gives the same answer
 assert names("Crown Royal Regal Apple Flavored Whisky - 375 Ml") == names("Crown Royal Regal Apple Flavored Whisky - 375 Ml")
 print("ok")
+
+# 7. a brand named in the raw name is a hard rule: every option is that brand's item, never another brand's
+from topk import fold_accents
+eng = get_model().eng
+for raw, brand in [("Jack Daniels Double Barrel", "jackdaniels"), ("1800 Tequila Double Barrel", "1800tequila"), ("Knob Creek Double Barrel", "knobcreek"),
+                   ("Bulleit Single Malt", "bulleit"), ("Patron Silver Tequila 1.75 L", "patron")]:
+    ops = [o for o in suggest(raw) if o["name"] != MISC_OPTION]
+    assert ops, raw
+    assert all(eng._bk(o["brand"]).replace(" ", "").startswith(brand[:5]) for o in ops), (raw, [(o["name"], o["brand"]) for o in ops])
+assert not any("1800" in o["name"] for o in suggest("Jack Daniels Double Barrel"))
+assert not any("Jack Dan" in o["name"] for o in suggest("1800 Tequila Double Barrel"))
+print("7 ok")
+
+# 8. a brand neither list knows gets no other-brand lookalikes ("Single Malt" alone must not pull in Bushmills / Bulleit)
+for raw in ["Glenfiddich Single Malt 12 Year", "Macallan Double Cask Single Malt", "Louis Jadot Beaujolais Villages"]:
+    assert suggest(raw) == [], raw
+assert fold_accents("Patron Citronge Nutrl") == "Patron Citronge Nutrl" and suggest("Nütrl Vodka Seltzer Pineapple 4pk")[0]["name"].startswith("Nutrl")
+print("8 ok")

@@ -20,6 +20,7 @@ import json
 import pickle
 import re
 import sys
+import unicodedata
 from collections import defaultdict
 from math import log, sqrt
 from pathlib import Path
@@ -37,10 +38,15 @@ MISC_OPTION = "<Misc - not a Liquor>"
 
 N_UNFILTERED, N_FILTERED, N_MEMORY = 30, 10, 8
 FEATURES = ["cos", "cos_gap", "rank_inv", "filt_score", "filt_top1", "is_hard_truth", "log_count", "mem_cos", "mem_exact",
-            "jaccard", "seq", "exact_name", "brand_ok", "item_cov", "raw_cov", "extra_words", "brand_in_raw"]
+            "jaccard", "seq", "exact_name", "brand_named", "item_cov", "raw_cov", "extra_words", "brand_in_raw", "unmatched_frac"]
 NF = len(FEATURES)
 
-DEFAULT_MIX = {"tau_first": 0.6, "tau_inc": 0.25, "slot": 2, "hint_mult": 0.4, "cov_mult": 0.6}
+DEFAULT_MIX = {"tau_first": 0.6, "tau_inc": 0.25, "slot": 2, "hint_mult": 0.4, "cov_mult": 0.6, "min_conf": 0.0}
+
+
+def fold_accents(s):
+    """Patron -> Patron, Nutrl -> Nutrl: the word matcher reads plain ASCII words (accented letters would split a word)."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")).strip()
 
 
 def item_key(name):
@@ -123,13 +129,13 @@ def softmax_rank_train(X, mask, pos, iters=500, lr=0.05, l2=1e-4):
     return w
 
 
-CAL_FEATURES = ["log_p", "p", "cos", "mem_cos", "jaccard", "brand_ok", "extra_words", "is_top1"]
+CAL_FEATURES = ["log_p", "p", "cos", "mem_cos", "jaccard", "brand_named", "extra_words", "unmatched_frac", "is_top1"]
 
 
 def cal_vector(p, frow, is_top1):
     """Features of one ranked option for the confidence calibration (frow: its row of FEATURES)."""
     g = lambda n: frow[FEATURES.index(n)]
-    return np.array([log(p + 1e-4), p, g("cos"), g("mem_cos"), g("jaccard"), g("brand_ok"), g("extra_words"), 1.0 if is_top1 else 0.0])
+    return np.array([log(p + 1e-4), p, g("cos"), g("mem_cos"), g("jaccard"), g("brand_named"), g("extra_words"), g("unmatched_frac"), 1.0 if is_top1 else 0.0])
 
 
 def fit_logistic(X, y, iters=400, lr=0.05, l2=1e-3):
@@ -175,7 +181,7 @@ class TopK:
         self.mu, self.sd = meta.get("mu"), meta.get("sd")
         self.mix = {**DEFAULT_MIX, **(meta.get("mix") or {})}
         self.cal = meta.get("cal")
-        self._tok, self._rr = {}, {}
+        self._tok, self._rr, self._wm = {}, {}, {}
         self._cache = {}
 
     # ---- candidate features ----
@@ -185,17 +191,70 @@ class TopK:
             v = self._tok[it] = (set(rawsig.tokens(it)), self.eng._rr_tokens(it), " ".join(rawsig.tokens(it)))
         return v
 
+    def unmatched_frac(self, s):
+        """Share of the raw name's content words (numbers aside) that match nothing in the catalog vocabulary in
+        any tier: a high share means the name carries words (often a brand) the model has never seen."""
+        words = [w for w in s["words"] if not w.isdigit()]
+        if not words:
+            return 0.0
+        miss = 0
+        for w in words:
+            ok = self._wm.get(w)
+            if ok is None:
+                ok = self._wm[w] = bool(self.eng.match_raw_word(w))
+            miss += not ok
+        return miss / len(words)
+
+    def unknown_brand_word(self, s):
+        """The first content words that look like a brand but are in no catalog item ("Glenfiddich Single Malt 12 Year",
+        "Louis Jadot Beaujolais", "Coors Light"): a word of 4+ letters, no digits, among the first two content words,
+        that the vocabulary does not know. A word is known when it is in the vocabulary (or an alias), or -- for words of
+        6+ letters -- a close misspelling of one (>= 85% similar: "Absolute", "Smirnof"). Short abbreviations (WL, Smir)
+        and size tokens (50ml) never count as unknown brands."""
+        eng = self.eng
+        for w in [w for w in s["words"] if not w.isdigit()][:2]:
+            if len(w) < 4 or not w.isalpha() or eng._exact_or_alias_match(w):
+                continue
+            m = eng.match_raw_word(w)
+            if len(w) >= 6 and m and m[0][1] >= 0.85:
+                continue
+            return w
+        return None
+
+    def allowed_brands(self, raw, s):
+        """Brand keys the raw name names (from the hard truth AND the brand lists), or an empty set when it names none.
+        A named brand is a hard rule: only that brand's items can be suggested ("Jack Daniels Double Barrel" never
+        brings up an "1800 ... Double Barrel"). Two named brands (a co-branded pack) allow both."""
+        eng = self.eng
+        low = APOSTROPHE_RE.sub("", raw.lower())
+        words = {eng._acc_norm(w) for w in eng.tokenize(raw)}
+        found = [eng._bk(b) for b, pat, bw in eng._brand_word_sets if (bw & words) and pat.search(low)]
+        found = [k for k in found if not any(k != o and k in o for o in found)]
+        allowed = set()
+        for k in found:
+            for bl in eng._brand_keys:
+                if bl == k or bl.startswith(k) or k.startswith(bl):
+                    allowed.add(bl)
+        if not allowed and s["anchor_family"]:          # a single distinctive brand word ("1800", "cuervo")
+            allowed = set(s["anchor_family"])
+        return allowed
+
     def candidates(self, raw):
         """-> (items [n], feature matrix [n, NF]); the unranked candidate pool for a raw name."""
         eng = self.eng
+        raw = fold_accents(raw)
         s = eng._raw_dot(raw)
         dot, rn = s["dot"], s["raw_norm"]
-        cos = {it: min(1.0, d / (rn * eng.item_norm[it])) for it, d in dot.items()}
+        allowed = self.allowed_brands(raw, s)
+        if not allowed and self.unknown_brand_word(s):
+            return [], np.zeros((0, NF))      # a brand neither list has: any liquor option would be another brand's product
+        in_brand = (lambda it: eng._item_brand_lower.get(it, "") in allowed) if allowed else (lambda it: True)
+        cos = {it: min(1.0, d / (rn * eng.item_norm[it])) for it, d in dot.items() if in_brand(it)}
         top = sorted(cos, key=lambda i: -cos[i])[:N_UNFILTERED]
         rank = {it: r for r, it in enumerate(top)}
-        filt = eng._catalog_only(raw, topk=N_FILTERED)
+        filt = [c for c in eng._catalog_only(raw, topk=N_FILTERED) if in_brand(c["item"])]
         filt_score = {c["item"]: c["score"] for c in filt}
-        mem = self.memory.lookup(raw)
+        mem = {it: v for it, v in self.memory.lookup(raw).items() if in_brand(it)}
         mem_top = sorted(mem, key=lambda i: -mem[i])[:N_MEMORY]
         pool = list(dict.fromkeys(top + [c["item"] for c in filt] + mem_top))
         if not pool:
@@ -204,7 +263,7 @@ class TopK:
         raw_toks = set(rawsig.tokens(raw))
         rt = eng._rr_tokens(raw)
         rseq = " ".join(rawsig.tokens(raw))
-        locked = _bk(s["locked_brand"]) if s["locked_brand"] else None
+        unm = self.unmatched_frac(s)
         rtw = s["raw_term_weight"]
         F = np.zeros((len(pool), NF))
         for j, it in enumerate(pool):
@@ -219,11 +278,12 @@ class TopK:
                 1.0 if self.item_source.get(it) == "H" else 0.0, log(1 + self.item_count.get(it, 0)) / 5.0,
                 mem.get(it, 0.0), 1.0 if mem.get(it, 0.0) >= 0.999 else 0.0,
                 len(rt & irr) / u, fuzz.ratio(rseq, iseq) / 100.0, 1.0 if (rseq == iseq and rt == irr) else 0.0,
-                (0.0 if locked is None else (1.0 if bl == locked else -1.0)),
+                (1.0 if allowed else 0.0),
                 (sum(1 for w in iv if w in rtw) / len(iv)) if iv else 0.0,
                 len(raw_toks & itoks) / (len(raw_toks) or 1),
                 len(itoks - raw_toks) / (len(itoks) or 1),
                 1.0 if (bl and set(rawsig.tokens(bl)) <= raw_toks) else 0.0,
+                unm,
             ]
         return pool, F
 
@@ -272,6 +332,8 @@ class TopK:
         ranked, pm, conf = self._cache[raw]
         out = []
         for item, p in mix_options(ranked, pm, k, self.mix):
+            if item != MISC_OPTION and conf[item] < self.mix.get("min_conf", 0.0):
+                continue            # too unlikely to be worth showing: fewer options is fine
             if item == MISC_OPTION:
                 out.append(dict(rank=len(out) + 1, name=MISC_OPTION, brand=MISC_CATEGORY, category=MISC_CATEGORY,
                                 score=round(p, 4), confidence=round(p, 4), source="misc"))
