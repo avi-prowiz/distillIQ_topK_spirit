@@ -20,7 +20,6 @@ import json
 import pickle
 import re
 import sys
-import unicodedata
 from collections import defaultdict
 from math import log, sqrt
 from pathlib import Path
@@ -29,6 +28,7 @@ import numpy as np
 from rapidfuzz import fuzz
 
 import rawsig
+from textfix import clean_text, fold_accents
 from matching import MatchEngine, APOSTROPHE_RE
 from misc_classifier import MISC_CATEGORY, alcohol_hint_blocks_misc
 
@@ -42,11 +42,6 @@ FEATURES = ["cos", "cos_gap", "rank_inv", "filt_score", "filt_top1", "is_hard_tr
 NF = len(FEATURES)
 
 DEFAULT_MIX = {"tau_first": 0.6, "tau_inc": 0.25, "slot": 2, "hint_mult": 0.4, "cov_mult": 0.6, "min_conf": 0.0}
-
-
-def fold_accents(s):
-    """Patron -> Patron, Nutrl -> Nutrl: the word matcher reads plain ASCII words (accented letters would split a word)."""
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")).strip()
 
 
 def item_key(name):
@@ -177,6 +172,8 @@ class TopK:
         self.item_source = meta["item_source"]
         self.item_count = meta["item_count"]
         self.memory = RawMemory(meta["mem"])
+        # every word the model knows, to restore a letter an encoding lost ("A?ejo" -> "Anejo")
+        self.vocab = set(self.eng.idf) | set(self.memory.idf)
         self.w = meta.get("w")
         self.mu, self.sd = meta.get("mu"), meta.get("sd")
         self.mix = {**DEFAULT_MIX, **(meta.get("mix") or {})}
@@ -320,7 +317,7 @@ class TopK:
 
     # ---- public ----
     def suggest(self, raw, k=5):
-        raw = "" if raw is None else str(raw).strip()
+        raw = clean_text(raw, self.vocab)        # one spelling per product: encodings repaired, accents folded
         if not raw:
             return []
         if raw not in self._cache:

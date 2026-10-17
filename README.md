@@ -72,6 +72,19 @@ python topk.py example.csv options.csv 4      # a different K (here 4)
 the tagger / a reviewer. A reasonable rule: take option 1 when its `confidence` is high (0.95 or more is right
 98% of the time), otherwise show the 5 options for a person to pick from.
 
+## One spelling per product
+
+The same product is written many ways in the raw data, and all of them must give the same answer. Before anything is
+matched, `textfix.py` repairs and folds the raw name, so `1800 Tequila Añejo`, `1800 Tequila Anejo`,
+`1800 Tequila AÃ±ejo`, `1800 Tequila Aï¿½ejo`, `1800 Tequila A�ejo` and `1800 TEQUILA ANEJO 750ML` return identical options:
+
+- UTF-8 read as Windows-1252 (`AÃ±ejo`, `â€™`) and as GBK (`1800庐` for ®, `Jack Daniel鈥檚` for ’s, `caf茅` for é) is decoded back;
+- a letter that was lost (`A�ejo`, `Aï¿½ejo`, `A?ejo`) is restored from the known words (`anejo`); if no known word fits, the gap is closed;
+- accents are removed (`ñ`, `ó`, `ü`), curly quotes straightened, symbols (®, ™, •) dropped, case and spacing ignored.
+
+The same clean-up is applied to the hard truth when the model is built (its raw names, item names and brands), so the
+accented and the plain spelling of an item are one item. `distillIQ_spirit_tagger_api` uses the same `textfix.py`.
+
 ## Brand rules
 
 The brand is the strongest signal, so it is a **hard rule**, not just a weight:
@@ -130,38 +143,39 @@ hard-truth item are not added as separate options.
 Measured out-of-fold: the model is rebuilt on 4/5 of the labeled raw names (grouped by raw name, so no raw string
 is on both sides) and scored on the other 1/5, five times. A **hit** means one of the options has the same words
 as the hard-truth item (size, case, punctuation and word order ignored); the strict version needs the identical
-string and is within 0.5 points. These numbers are before the 0.5% confidence floor, which removes options that are almost never right. 32,774 labeled rows.
+string and is within 0.5 points. These numbers are before the 0.5% confidence floor, which removes options that are almost never right. 32,770 labeled rows. (After the spelling clean-up, raw names that only differed by encoding count as one name and stay
+on the same side of the split, so these numbers are a little lower and more honest than before.)
 
 | Rows | Top-1 | Top-3 | Top-5 |
 |---|---|---|---|
-| Liquor items (17,117) | 79.3% | 87.2% | **88.5%** |
-| Misc / non-liquor names (15,657): `<Misc>` option shown | 96.4% (first) | 98.2% | **98.2%** |
-| All rows | 87.5% | 92.5% | **93.1%** |
-| *Baseline: TF-IDF cosine only* (liquor rows) | 74.1% | 85.2% | 86.8% |
+| Liquor items (17,114) | 78.6% | 86.5% | **87.8%** |
+| Misc / non-liquor names (15,656): `<Misc>` option shown | 96.6% (first) | 98.6% | **98.6%** |
+| All rows | 87.2% | 92.3% | **92.9%** |
+| *Baseline: TF-IDF cosine only* (liquor rows) | 73.7% | 84.6% | 86.3% |
 
-- **The ceiling for liquor rows is 90.4%**: that share of held-out rows has their item somewhere in the catalog
-  built without them, so top-5 reaches 98% of what is reachable (the brand rules cost 0.1 point against an unrestricted ranking). The rest are items no list contains.
-- The Misc option is also shown on 2.3% of liquor rows (first on 1.7%), which costs liquor top-1 about 1 point.
+- **The ceiling for liquor rows is 89.9%**: that share of held-out rows has their item somewhere in the catalog
+  built without them, so top-5 reaches 98% of what is reachable (the brand rules cost about 0.1 point against an unrestricted ranking). The rest are items no list contains.
+- The Misc option is also shown on 2.7% of liquor rows (first on 1.7%), which costs liquor top-1 about 1 point.
 - Brand-list products (not in the hard truth) queried by their own name are found at top-1 95%, top-5 100%.
 
 By category (top-1 / top-5):
 
 | Category | Rows | Top-1 | Top-5 | Item in catalog |
 |---|---|---|---|---|
-| Whiskey | 5,371 | 78.0% | 87.1% | 89.7% |
-| Vodka | 2,956 | 83.5% | 91.3% | 92.9% |
-| Tequila | 2,902 | 84.8% | 93.1% | 94.4% |
-| Ready-To-Drink | 2,631 | 78.3% | 85.5% | 87.6% |
-| Rum | 1,103 | 86.3% | 91.9% | 93.6% |
-| Prepared Cocktails | 896 | 76.0% | 87.7% | 89.2% |
-| Hard Seltzer | 430 | 78.1% | 87.4% | 89.8% |
-| Mezcal | 247 | 87.4% | 90.3% | 91.1% |
-| Liqueur (78 rows) | 78 | 76.9% | 82.1% | 84.6% |
+| Whiskey | 5,371 | 77.7% | 86.8% | 89.4% |
+| Vodka | 2,956 | 82.4% | 90.4% | 92.1% |
+| Tequila | 2,902 | 83.7% | 92.1% | 93.7% |
+| Ready-To-Drink | 2,631 | 76.6% | 83.9% | 86.2% |
+| Rum | 1,103 | 85.9% | 91.2% | 93.0% |
+| Prepared Cocktails | 896 | 77.7% | 88.5% | 90.6% |
+| Hard Seltzer | 430 | 74.0% | 83.7% | 86.5% |
+| Mezcal | 247 | 85.4% | 87.9% | 89.5% |
+| Liqueur (78 rows) | 78 | 78.2% | 89.7% | 89.7% |
 | Gin (61 rows) | 61 | 86.9% | 86.9% | 86.9% |
-| Wine (36 rows) | 36 | 88.9% | 88.9% | 88.9% |
-| Beer (62 rows) | 62 | 41.9% | 48.4% | 48.4% |
+| Wine (36 rows) | 36 | 83.3% | 83.3% | 83.3% |
+| Beer (62 rows) | 62 | 53.2% | 61.3% | 61.3% |
 | Cider (2), Cognac (2) | 4 | too few | | |
-| Misc. Accessories & Gifts | 15,997 | 94.6% | 97.6% | 100% |
+| Misc. Accessories & Gifts | 15,993 | 94.8% | 98.0% | 100% |
 
 (The Misc rows include 340 real-named items such as "Tres Agaves Margarita Mix" that are ordinary catalog items.)
 
@@ -169,13 +183,13 @@ By category (top-1 / top-5):
 
 | Confidence | Options | Actually correct |
 |---|---|---|
-| 0.95 - 1.00 | 6,679 | 98.3% |
-| 0.90 - 0.95 | 3,262 | 92.2% |
-| 0.80 - 0.90 | 2,217 | 80.2% |
-| 0.60 - 0.80 | 1,826 | 63.7% |
-| 0.40 - 0.60 | 1,172 | 48.0% |
-| 0.20 - 0.40 | 1,111 | 36.4% |
-| below 0.20 | 15,147 | 1.9% |
+| 0.95 - 1.00 | 5,932 | 98.3% |
+| 0.90 - 0.95 | 3,805 | 94.1% |
+| 0.80 - 0.90 | 2,247 | 78.8% |
+| 0.60 - 0.80 | 1,882 | 61.7% |
+| 0.40 - 0.60 | 1,233 | 49.0% |
+| 0.20 - 0.40 | 1,125 | 35.3% |
+| below 0.20 | 15,202 | 1.9% |
 
 (The below-0.20 group is mostly Misc rows, where no liquor option is right.) The full tables are in
 `topk_evaluation.xlsx`. Reproduce them with `evaluate_topk.py`.
@@ -204,7 +218,7 @@ average 3.2 options. Speed: about 140 names per second after a 3 second load.
 When the hard truth or the brand lists change:
 
 ```bash
-python build_topk.py "path\to\super-set-map-v2.1.xlsx" "path\to\brand wise items.zip" \
+python build_topk.py "path\to\super-set-map-v2.1.xlsx" \
     --extra-negatives pseudo_negatives.txt --folds 5 --cache some_folder
 ```
 
@@ -213,7 +227,8 @@ python build_topk.py "path\to\super-set-map-v2.1.xlsx" "path\to\brand wise items
 non-liquor. `--cache` keeps the per-fold models so a rerun is fast. The command rebuilds the five fold models
 (about 8 minutes), prints the out-of-fold report, fits the ranker, calibration and Misc thresholds, and writes
 `data/graph.pkl` and `data/topk_meta.pkl`. `python evaluate_topk.py <truth> <brands> --out report.xlsx` only
-evaluates. The brand lists can be given as the zip or the unzipped folder (it needs the `brands/` folder).
+evaluates. The brand lists default to the `brand wise items.zip` in this folder; pass another zip or an unzipped folder (it needs the
+`brands/` folder) as a second argument to use a different one.
 
 ## Folder contents
 
@@ -223,6 +238,9 @@ evaluates. The brand lists can be given as the zip or the unzipped folder (it ne
 | `build_topk.py` | Builds the catalog (hard truth + brand lists), the word graph, the Misc model, the raw-name memory. |
 | `evaluate_topk.py` | Out-of-fold evaluation and fitting of ranker, calibration and Misc thresholds. |
 | `brand_lists.py` | Reads `brand wise items.zip` into clean `brand product` names. |
+| `textfix.py` | Repairs broken encodings and folds accents so every spelling of a product is one name. |
+| `brand wise items.zip` | The brand-wise product lists the model is built from. |
+| `.gitignore` | Ignores `__pycache__/`. |
 | `matching.py`, `misc_classifier.py`, `rawsig.py`, `build_graph.py` | Copies of the tagger engine pieces it builds on. |
 | `data/graph.pkl`, `data/topk_meta.pkl` | The trained model. |
 | `data/suspect_hardtruth_rows.csv` | The 31 hard-truth rows left out as labeling errors (worth a manual look). |

@@ -69,3 +69,14 @@ for raw in ["Glenfiddich Single Malt 12 Year", "Macallan Double Cask Single Malt
     assert suggest(raw) == [], raw
 assert fold_accents("Patron Citronge Nutrl") == "Patron Citronge Nutrl" and suggest("Nütrl Vodka Seltzer Pineapple 4pk")[0]["name"].startswith("Nutrl")
 print("8 ok")
+
+# 9. the same product in different spellings / broken encodings is one product: same options, same Misc decision
+V = ["1800 Tequila Anejo 750 ml", "1800 Tequila Añejo 750 ml", "1800 Tequila AÃ±ejo 750 ml", "1800 Tequila A�ejo 750 ml",
+     "1800 Tequila Aï¿½ejo 750 ml", "1800 TEQUILA ANEJO 750ML", "1800庮 Tequila Anejo 750 ml"]
+res = [[o["name"] for o in suggest(v)] for v in V]
+assert all(r == res[0] for r in res) and res[0][0] == "1800 Anejo Tequila", res
+for a, b in [("Patrón Silver Tequila", "Patron Silver Tequila"), ("Jack Daniel鈧檪s Honey", "Jack Daniel's Honey"),
+             ("Jack Daniel’s Honey", "Jack Daniels Honey"), ("Bacardí Superior Rum", "Bacardi Superior Rum"),
+             ("Coca Cola Classic 2 L", "Coca Cola Classic 2 L")]:
+    assert names(a) == names(b), (a, names(a), names(b))
+print("9 ok")

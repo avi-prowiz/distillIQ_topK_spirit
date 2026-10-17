@@ -23,6 +23,7 @@ import pandas as pd
 import brand_lists as bl
 import build_graph as bg
 import rawsig
+import textfix
 from misc_classifier import MISC_CATEGORY, train as train_misc_model
 
 
@@ -31,6 +32,11 @@ def load_truth(path, drop_suspect=True):
     ("Red Bull, Original" -> Long Drink Peach; ~30 rows) are labeling errors: they would teach the model
     wrong name mappings, so they are left out (returned in df.attrs['suspect'])."""
     df = bg.load_items(Path(path))
+    # one spelling per product: repair broken encodings (UTF-8 read as cp1252 / GBK, lost letters) and fold accents
+    vocab = {w for it in df["item"].unique() for w in rawsig.tokens(it)} | {w for b in df["brand"].unique() for w in rawsig.tokens(b)}
+    for col in ("item", "brand"):
+        df[col] = [textfix.clean_text(v) for v in df[col]]
+    df["raw"] = [textfix.clean_text(v, vocab) for v in df["raw"]]
     df, dropped = bg.drop_conflicting_misc(df)
     df["key"] = df["raw"].map(bg.norm_key)
     alc = df["category"] != MISC_CATEGORY
@@ -106,7 +112,7 @@ def build_model(train, B, out_dir, extra_negatives=None):
     raws, labels = train["raw"].tolist(), is_misc.astype(int).tolist()
     if extra_negatives:
         known = {bg.norm_key(r) for r in raws}
-        extra = [ln.strip() for ln in Path(extra_negatives).read_text(encoding="utf-8").splitlines()]
+        extra = [textfix.clean_text(ln) for ln in Path(extra_negatives).read_text(encoding="utf-8").splitlines()]
         extra = [r for r in extra if r and bg.norm_key(r) not in known]
         raws += extra
         labels += [0] * len(extra)
@@ -133,7 +139,8 @@ def build_model(train, B, out_dir, extra_negatives=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("truth", type=Path)
-    ap.add_argument("brands", type=Path, help="'brand wise items.zip' or the unzipped folder")
+    ap.add_argument("brands", type=Path, nargs="?", default=Path(__file__).resolve().parent / "brand wise items.zip",
+                    help="'brand wise items.zip' or the unzipped folder (default: the zip in this folder)")
     ap.add_argument("--extra-negatives", type=Path, default=None)
     ap.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "data")
     ap.add_argument("--folds", type=int, default=5)

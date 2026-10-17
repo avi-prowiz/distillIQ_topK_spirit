@@ -343,7 +343,7 @@ def fit_and_save(args):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("truth", type=Path)
-    ap.add_argument("brands", type=Path)
+    ap.add_argument("brands", type=Path, nargs="?", default=Path(__file__).resolve().parent / "brand wise items.zip")
     ap.add_argument("--extra-negatives", type=Path, default=None)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--cache", type=Path, default=None)
